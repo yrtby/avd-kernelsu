@@ -1,0 +1,142 @@
+name: Build Patched AVD Kernel (6.1.23 maps-scrub)
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest_branch:
+        description: 'Kernel manifest branch (build tools era)'
+        type: string
+        default: 'common-android14-6.1-2023-05-exp'
+      common_ref:
+        description: 'Gerrit ref to pin common/ to exact AVD kernel (6.1.23 = refs/changes/11/2540711/2)'
+        type: string
+        default: 'refs/changes/11/2540711/2'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout (patch script)
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space
+        uses: endersonmenezes/free-disk-space@v3
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+          remove_swap: true
+          remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* mysql* dotnet-sdk-*"
+          remove_packages_one_command: true
+          remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
+          rm_cmd: "rmz"
+          rmz_version: "3.1.1"
+          testing: false
+
+      - name: Setup repo tool
+        run: |
+          mkdir -p ~/bin "$GITHUB_WORKSPACE/kernel"
+          curl -L https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
+          chmod +x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+          git config --global user.name "ci"
+          git config --global user.email "ci@local"
+          git config --global color.ui false
+
+      - name: Sync kernel manifest
+        working-directory: ${{ github.workspace }}/kernel
+        run: |
+          set -ex
+          repo init -u https://android.googlesource.com/kernel/manifest \
+            -b ${{ inputs.manifest_branch }} --depth=1
+          repo --trace sync -c -j$(nproc --all) --fail-fast --no-tags \
+            --force-sync --no-clone-bundle --optimized-fetch
+
+      - name: Pin common/ to exact AVD kernel commit (6.1.23)
+        working-directory: ${{ github.workspace }}/kernel/common
+        run: |
+          set -ex
+          git fetch --depth=1 https://android.googlesource.com/kernel/common ${{ inputs.common_ref }}
+          git checkout -f FETCH_HEAD
+          echo "=== pinned common version ==="
+          head -5 Makefile
+
+      - name: Apply maps-scrub patch
+        run: |
+          set -ex
+          python3 "$GITHUB_WORKSPACE/patch_task_mmu.py" "$GITHUB_WORKSPACE/kernel/common/fs/proc/task_mmu.c"
+          echo "=== verify patch present ==="
+          grep -n 'rea_scrub_path' "$GITHUB_WORKSPACE/kernel/common/fs/proc/task_mmu.c" | head
+
+      - name: Build GKI kernel (aarch64)
+        working-directory: ${{ github.workspace }}/kernel
+        run: |
+          set -ex
+          # Primary: Kleaf (bazel). android14-6.1 uses this.
+          if [ -x tools/bazel ] || [ -f tools/bazel ]; then
+            tools/bazel build --config=fast --lto=thin //common:kernel_aarch64_dist \
+              || tools/bazel build --lto=thin //common:kernel_aarch64_dist \
+              || tools/bazel build //common:kernel_aarch64_dist
+          elif [ -f build/build.sh ]; then
+            SKIP_MRPROPER=1 LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh
+          else
+            echo "No known build system found"; exit 1
+          fi
+
+      - name: Collect kernel Image
+        id: collect
+        working-directory: ${{ github.workspace }}/kernel
+        run: |
+          set -ex
+          OUT="$GITHUB_WORKSPACE/out"; mkdir -p "$OUT"
+          # Kleaf dist/plain outputs
+          for p in \
+            bazel-bin/common/kernel_aarch64_dist \
+            bazel-bin/common/kernel_aarch64 \
+            $(find out -type d -name dist 2>/dev/null); do
+            [ -d "$p" ] || continue
+            for f in Image Image.gz Image.lz4 bzImage; do
+              [ -f "$p/$f" ] && cp -v "$p/$f" "$OUT/" || true
+            done
+          done
+          # Safety net: scavenge any Image from bazel tree
+          if [ ! -f "$OUT/Image" ] && [ ! -f "$OUT/Image.gz" ]; then
+            FOUND=$(find bazel-bin out -name 'Image' -type f 2>/dev/null | head -1)
+            [ -n "$FOUND" ] && cp -v "$FOUND" "$OUT/"
+          fi
+          # Ensure we have a gzipped variant (emulator kernel-ranchu is gzip'd)
+          if [ -f "$OUT/Image" ] && [ ! -f "$OUT/Image.gz" ]; then
+            gzip -9 -k "$OUT/Image"
+          fi
+          echo "=== collected ==="; ls -la "$OUT/"
+          test -f "$OUT/Image" -o -f "$OUT/Image.gz"
+          # version banner for sanity
+          strings "$OUT/Image" 2>/dev/null | grep -m1 '6\.1\.23-android14' || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: patched-kernel-6123-aarch64
+          path: out/**
+          if-no-files-found: error
+          compression-level: 6
+
+      - name: Publish release (for easy device download)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: patched-6123-${{ github.run_number }}
+          name: Patched AVD kernel 6.1.23 (maps-scrub) r${{ github.run_number }}
+          body: |
+            GKI aarch64 kernel pinned to the AVD's exact 6.1.23 commit (7e35917775b8)
+            with a /proc/*/maps path-display scrub (emu/goldfish/ranchu). Boot with:
+            `emulator -avd <avd> -no-snapshot-load -gpu swiftshader_indirect -kernel Image`
+          draft: false
+          prerelease: false
+          files: |
+            out/Image
+            out/Image.gz
