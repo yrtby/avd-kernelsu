@@ -209,6 +209,18 @@ jobs:
               --defconfig_fragment=${DEFCONFIG_FRAG} \
               ${KERNEL_TARGET} || exit 1
 
+            # FIX: failover/net_failover are =y in the GKI base kernel, so the
+            # virtual-device target cannot produce failover.ko/net_failover.ko and the
+            # whole module build aborts before goldfish/virtio .ko are staged. Drop them
+            # from the virtual-device module_outs so the build completes with the display
+            # drivers (goldfish_pipe, virtio_gpu, ...). The failover functionality remains
+            # built-in; it is not needed for AVD display or basic networking.
+            for f in common-modules/virtual-device/BUILD.bazel; do
+              [ -f "$f" ] && sed -i '/"net_failover\.ko"/d; /"failover\.ko"/d' "$f" && echo "patched $f (removed failover module_outs)"
+            done
+            echo "=== remaining failover refs in virtual-device BUILD.bazel ==="
+            grep -n "failover" common-modules/virtual-device/BUILD.bazel || echo "(none)"
+
             # Build virtual device modules for AVD
             if [ "${{ inputs.build_modules }}" = "true" ]; then
               tools/bazel build \
