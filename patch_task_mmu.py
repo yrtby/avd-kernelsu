@@ -22,7 +22,7 @@ import sys
 PATH = sys.argv[1] if len(sys.argv) > 1 else "kernel/common/fs/proc/task_mmu.c"
 
 HELPER = (
-    "/* REA: scrub emulator-artifact substrings from /proc/*/maps path display */\n"
+    "/* REA: scrub emulator-artifact substrings from procfs maps path display */\n"
     "static void rea_scrub_path(char *s, size_t n)\n"
     "{\n"
     "\tstatic const char * const rea_kw[] = { \"emu\", \"goldfish\", \"ranchu\" };\n"
