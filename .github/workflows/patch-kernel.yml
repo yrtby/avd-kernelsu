@@ -9,7 +9,7 @@ on:
       manifest_branch:
         description: 'Kernel manifest branch (build tools era)'
         type: string
-        default: 'common-android14-6.1-2023-05-exp'
+        default: 'common-android14-6.1-2023-06'
       common_ref:
         description: 'Gerrit ref to pin common/ to exact AVD kernel (6.1.23 = refs/changes/11/2540711/2)'
         type: string
@@ -72,6 +72,33 @@ jobs:
           python3 "$GITHUB_WORKSPACE/patch_task_mmu.py" "$GITHUB_WORKSPACE/kernel/common/fs/proc/task_mmu.c"
           echo "=== verify patch present ==="
           grep -n 'rea_scrub_path' "$GITHUB_WORKSPACE/kernel/common/fs/proc/task_mmu.c" | head
+
+      - name: Diagnose + fix toolchain (clang availability)
+        working-directory: ${{ github.workspace }}/kernel
+        run: |
+          set -x
+          CD=prebuilts/clang/host/linux-x86
+          echo "=== available clang dirs ==="
+          ls -d $CD/clang-* 2>/dev/null || echo "(none)"
+          echo "=== clang versions referenced by kleaf ==="
+          grep -rhoE 'clang-r[0-9]+[a-z]*[0-9]*' $CD/kleaf/ 2>/dev/null | sort -u || true
+          echo "=== common CLANG_VERSION constant ==="
+          grep -rn 'CLANG_VERSION' common/build.config.constants 2>/dev/null | head || true
+          # Auto-fix: if a referenced clang dir is missing, symlink it to an
+          # available one. clang version does NOT affect module CRCs/vermagic
+          # (those are source-derived), so any working clang builds a
+          # CRC-compatible kernel for the AVD's 6.1.23 vendor modules.
+          AVAIL=$(ls -d $CD/clang-r* 2>/dev/null | head -1)
+          if [ -n "$AVAIL" ]; then
+            for REF in $(grep -rhoE 'clang-r[0-9]+[a-z]*[0-9]*' $CD/kleaf/ 2>/dev/null | sort -u); do
+              if [ ! -e "$CD/$REF" ]; then
+                ln -s "$(basename "$AVAIL")" "$CD/$REF"
+                echo "symlinked missing $REF -> $(basename "$AVAIL")"
+              fi
+            done
+          fi
+          echo "=== after fix ==="
+          ls -ld $CD/clang-r* 2>/dev/null || echo "(none)"
 
       - name: Build GKI kernel (aarch64)
         working-directory: ${{ github.workspace }}/kernel
